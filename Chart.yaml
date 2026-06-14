@@ -1,0 +1,19 @@
+apiVersion: v2
+name: temporal-stack
+description: >-
+  Production-style Temporal cluster (frontend/history/matching/worker) with a
+  bundled PostgreSQL subchart and Web UI, hardened for OpenShift restricted-v2 SCC.
+type: application
+version: 0.1.0
+# appVersion tracks the Temporal server image we default to.
+appVersion: "1.29.7"
+keywords:
+  - temporal
+  - workflow
+  - postgresql
+  - openshift
+dependencies:
+  - name: postgresql
+    version: 18.7.3
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled

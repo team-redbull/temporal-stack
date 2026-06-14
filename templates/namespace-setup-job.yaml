@@ -1,0 +1,92 @@
+{{- if .Values.temporal.setup.enabled }}
+{{- $addr := printf "%s:%v" (include "temporal-stack.frontendService" .) .Values.temporal.frontendPort -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "temporal-stack.fullname" . }}-setup
+  labels:
+    {{- include "temporal-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: setup
+  annotations:
+    # Runs after the schema hook (weight 0); waits for the frontend, then
+    # provisions the default namespace and search attributes. Idempotent.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "temporal-stack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: setup
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-frontend
+          image: "{{ .Values.waitImage.repository }}:{{ .Values.waitImage.tag }}"
+          imagePullPolicy: {{ .Values.waitImage.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for {{ include "temporal-stack.frontendService" . }}:{{ .Values.temporal.frontendPort }} ..."
+              until nc -z {{ include "temporal-stack.frontendService" . }} {{ .Values.temporal.frontendPort }}; do
+                sleep 2
+              done
+      containers:
+        - name: setup
+          image: "{{ .Values.temporal.schema.image.repository }}:{{ .Values.temporal.schema.image.tag }}"
+          imagePullPolicy: {{ .Values.temporal.schema.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: {{ $addr | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              NS="{{ .Values.temporal.setup.defaultNamespace }}"
+
+              echo "Waiting for cluster health..."
+              until temporal operator cluster health | grep -q SERVING; do sleep 2; done
+
+              if temporal operator namespace describe "$NS" >/dev/null 2>&1; then
+                echo "Namespace $NS already exists."
+              else
+                echo "Creating namespace $NS ..."
+                temporal operator namespace create \
+                  --retention "{{ .Values.temporal.setup.retention }}" \
+                  --description "Default namespace" "$NS"
+              fi
+              {{- if .Values.temporal.setup.searchAttributes }}
+
+              echo "Ensuring custom search attributes on $NS ..."
+              temporal operator search-attribute create --namespace "$NS" \
+                --name CustomKeywordField  --type Keyword \
+                --name CustomStringField   --type Text \
+                --name CustomTextField     --type Text \
+                --name CustomIntField      --type Int \
+                --name CustomDatetimeField --type Datetime \
+                --name CustomDoubleField   --type Double \
+                --name CustomBoolField     --type Bool || echo "  (search attributes already present)"
+              {{- end }}
+              echo "Setup complete."
+          resources:
+            {{- toYaml .Values.temporal.schema.resources | nindent 12 }}
+{{- end }}

@@ -1,0 +1,23 @@
+temporal-stack {{ .Chart.AppVersion }} deployed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  - PostgreSQL ........ {{ if .Values.postgresql.enabled }}bundled ({{ include "temporal-stack.dbHost" . }}){{ else }}external ({{ .Values.database.host }}){{ end }}
+  - Temporal server ... frontend / history / matching / worker
+  - Schema job ........ {{ include "temporal-stack.fullname" . }}-schema (Helm post-install/upgrade hook)
+  - Web UI ............ {{ if .Values.ui.enabled }}enabled{{ else }}disabled{{ end }}
+
+Connect a Temporal client (gRPC):
+  {{ include "temporal-stack.frontendService" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.temporal.frontendPort }}
+
+{{- if and .Values.ui.enabled .Values.ui.route.enabled }}
+
+Open the Web UI:
+  oc get route {{ include "temporal-stack.fullname" . }}-ui -n {{ .Release.Namespace }} -o jsonpath='https://{.spec.host}{"\n"}'
+{{- else if .Values.ui.enabled }}
+
+Port-forward the Web UI:
+  oc port-forward -n {{ .Release.Namespace }} svc/{{ include "temporal-stack.fullname" . }}-ui {{ .Values.ui.port }}:{{ .Values.ui.port }}
+{{- end }}
+
+Watch rollout:
+  oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -w

@@ -1,0 +1,174 @@
+# ---------------------------------------------------------------------------
+# temporal-stack values
+# ---------------------------------------------------------------------------
+# Hardened for OpenShift's restricted-v2 SCC: no container pins runAsUser/fsGroup,
+# so the namespace's UID range is injected automatically.
+# ---------------------------------------------------------------------------
+
+nameOverride: ""
+# Keep resource names clean (temporal-frontend, temporal-ui, ...) regardless of
+# the release name, instead of <release>-temporal-stack-*.
+fullnameOverride: "temporal"
+
+# Image pull secrets applied to every workload (Temporal + schema job + UI).
+# In an air-gapped install, create a pull secret for your internal registry and
+# list it here, e.g. [{ name: internal-registry }].
+imagePullSecrets: []
+
+# Small utility image used by the hook Jobs' wait-for init containers.
+# Mirror this too for air-gapped installs.
+waitImage:
+  repository: busybox
+  tag: "1.36"
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Temporal server (split services) + schema management
+# ---------------------------------------------------------------------------
+temporal:
+  image:
+    # The auto-setup image renders config from env vars and runs the service(s)
+    # named in SERVICES. Schema creation is delegated to the schema Job below
+    # (SKIP_SCHEMA_SETUP/SKIP_DB_CREATE are set on the server pods).
+    repository: temporalio/auto-setup
+    tag: "1.29.7"
+    pullPolicy: IfNotPresent
+
+  # Number of history shards. Must be fixed for the life of the cluster.
+  numHistoryShards: 512
+
+  # gRPC frontend port other clients/UI connect to.
+  frontendPort: 7233
+
+  # Per-role deployments. grpcPort/membershipPort match Temporal defaults.
+  services:
+    frontend:
+      replicaCount: 2
+      grpcPort: 7233
+      membershipPort: 6933
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: "1",  memory: 512Mi }
+    history:
+      replicaCount: 2
+      grpcPort: 7234
+      membershipPort: 6934
+      resources:
+        requests: { cpu: 200m, memory: 512Mi }
+        limits:   { cpu: "2",  memory: 1Gi }
+    matching:
+      replicaCount: 2
+      grpcPort: 7235
+      membershipPort: 6935
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: "1",  memory: 512Mi }
+    worker:
+      replicaCount: 2
+      grpcPort: 7239
+      membershipPort: 6939
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: "1",  memory: 512Mi }
+
+  # Soft anti-affinity spreads replicas of the same role across nodes.
+  podAntiAffinity: soft
+
+  # One-time provisioning of the default namespace + search attributes,
+  # run by a hook Job against the frontend (not per-pod).
+  setup:
+    enabled: true
+    defaultNamespace: default
+    retention: 72h
+    searchAttributes: true
+
+  # Extra Temporal dynamic config (rendered into a ConfigMap).
+  dynamicConfig: {}
+    # frontend.enableUpdateWorkflowExecution:
+    #   - value: true
+
+  # Schema setup/upgrade job (Helm hook). Uses admin-tools (temporal-sql-tool).
+  schema:
+    image:
+      repository: temporalio/admin-tools
+      tag: "1.29.7-tctl-1.18.4-cli-1.7.2"
+      pullPolicy: IfNotPresent
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 256Mi }
+
+# ---------------------------------------------------------------------------
+# Temporal Web UI
+# ---------------------------------------------------------------------------
+ui:
+  enabled: true
+  image:
+    repository: temporalio/ui
+    tag: "2.51.0"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  port: 8080
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+  route:
+    enabled: true
+    # Leave host empty to let OpenShift assign <name>-<namespace>.apps.<cluster>.
+    host: ""
+    tls:
+      termination: edge
+      insecureEdgeTerminationPolicy: Redirect
+
+# ---------------------------------------------------------------------------
+# Database connection (consumed by server pods + schema job)
+# ---------------------------------------------------------------------------
+# When postgresql.enabled=true these default to the bundled subchart.
+database:
+  driver: postgres12          # Temporal SQL plugin (works with PG 12..17)
+  host: ""                    # defaults to the bundled postgres service if empty
+  port: 5432
+  user: postgres
+  # Password is read from a Secret. With the bundled chart this is the
+  # postgres admin secret; override existingSecret/secretKey to bring your own.
+  existingSecret: ""          # empty => use bundled postgres secret
+  secretKey: postgres-password
+  temporalDb: temporal
+  visibilityDb: temporal_visibility
+
+# ---------------------------------------------------------------------------
+# Bundled PostgreSQL (Bitnami subchart)
+# ---------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  # Deterministic name so the server pods/job can reference the service & secret.
+  fullnameOverride: temporal-postgresql
+
+  # Auto-strip runAsUser/fsGroup so it runs under OpenShift's assigned UID range.
+  global:
+    compatibility:
+      openshift:
+        adaptSecurityContext: auto
+
+  # NOTE: docker.io/bitnami only publishes :latest now; concrete tags live in
+  # bitnamilegacy. Pinned to a known-good legacy tag for reproducible pulls.
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/postgresql
+    tag: 17.6.0-debian-12-r4
+
+  auth:
+    enablePostgresUser: true
+    # Test default. Override with --set or an existingSecret for real use.
+    postgresPassword: "temporal-postgres-pw"
+    database: temporal
+
+  architecture: standalone
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+      # Empty => cluster default StorageClass (ocs-external-storagecluster-ceph-rbd).
+      storageClass: ""
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits:   { cpu: "2",  memory: 1Gi }

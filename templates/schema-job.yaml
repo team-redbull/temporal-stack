@@ -1,0 +1,77 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "temporal-stack.fullname" . }}-schema
+  labels:
+    {{- include "temporal-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: schema
+  annotations:
+    # Run after the DB is up, on every install/upgrade. Idempotent.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "temporal-stack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: schema
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-db
+          image: "{{ .Values.waitImage.repository }}:{{ .Values.waitImage.tag }}"
+          imagePullPolicy: {{ .Values.waitImage.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for {{ include "temporal-stack.dbHost" . }}:{{ .Values.database.port }} ..."
+              until nc -z {{ include "temporal-stack.dbHost" . }} {{ .Values.database.port }}; do
+                sleep 2
+              done
+              echo "Database reachable."
+      containers:
+        - name: schema
+          image: "{{ .Values.temporal.schema.image.repository }}:{{ .Values.temporal.schema.image.tag }}"
+          imagePullPolicy: {{ .Values.temporal.schema.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            {{- include "temporal-stack.dbEnv" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              PG="postgres12"
+              BASE="temporal-sql-tool --plugin $PG --ep $POSTGRES_SEEDS -p $DB_PORT -u $POSTGRES_USER --pw $POSTGRES_PWD"
+              SCHEMA_DIR=/etc/temporal/schema/postgresql/v12
+
+              echo "== main DB ($DBNAME) =="
+              $BASE --db "$DBNAME" create-database || echo "  (database exists)"
+              $BASE --db "$DBNAME" setup-schema -v 0.0 || echo "  (schema initialised)"
+              $BASE --db "$DBNAME" update-schema -d "$SCHEMA_DIR/temporal/versioned"
+
+              echo "== visibility DB ($VISIBILITY_DBNAME) =="
+              $BASE --db "$VISIBILITY_DBNAME" create-database || echo "  (database exists)"
+              $BASE --db "$VISIBILITY_DBNAME" setup-schema -v 0.0 || echo "  (schema initialised)"
+              $BASE --db "$VISIBILITY_DBNAME" update-schema -d "$SCHEMA_DIR/visibility/versioned"
+
+              echo "Schema setup complete."
+          resources:
+            {{- toYaml .Values.temporal.schema.resources | nindent 12 }}

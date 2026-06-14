@@ -1,0 +1,156 @@
+{{- $root := . -}}
+{{- $full := include "temporal-stack.fullname" . -}}
+{{- range $role, $svc := .Values.temporal.services }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-{{ $role }}
+  labels:
+    {{- include "temporal-stack.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  replicas: {{ $svc.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "temporal-stack.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $role }}
+  template:
+    metadata:
+      labels:
+        {{- include "temporal-stack.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+      annotations:
+        checksum/dynamicconfig: {{ include (print $root.Template.BasePath "/configmap-dynamicconfig.yaml") $root | sha256sum }}
+    spec:
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if eq $root.Values.temporal.podAntiAffinity "soft" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "temporal-stack.selectorLabels" $root | nindent 20 }}
+                    app.kubernetes.io/component: {{ $role }}
+      {{- end }}
+      initContainers:
+        # OpenShift runs as an arbitrary UID, so the image's /etc/temporal/config
+        # dir isn't writable. Seed it into a writable emptyDir the entrypoint can
+        # render docker.yaml into.
+        - name: seed-config
+          image: "{{ $root.Values.temporal.image.repository }}:{{ $root.Values.temporal.image.tag }}"
+          imagePullPolicy: {{ $root.Values.temporal.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          command: ["sh", "-c", "cp -a /etc/temporal/config/. /config-rw/"]
+          volumeMounts:
+            - name: config
+              mountPath: /config-rw
+      containers:
+        - name: temporal
+          image: "{{ $root.Values.temporal.image.repository }}:{{ $root.Values.temporal.image.tag }}"
+          imagePullPolicy: {{ $root.Values.temporal.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - name: SERVICES
+              value: {{ $role | quote }}
+            # Schema is owned by the schema Job; servers must not touch it.
+            - name: SKIP_SCHEMA_SETUP
+              value: "true"
+            - name: SKIP_DB_CREATE
+              value: "true"
+            - name: ENABLE_ES
+              value: "false"
+            - name: NUM_HISTORY_SHARDS
+              value: {{ $root.Values.temporal.numHistoryShards | quote }}
+            # Bind/broadcast on the pod IP so ringpop peers (discovered via the
+            # cluster_membership table) can reach this host directly.
+            - name: BIND_ON_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: PUBLIC_FRONTEND_ADDRESS
+              value: "{{ include "temporal-stack.frontendService" $root }}:{{ $root.Values.temporal.frontendPort }}"
+            # Point the entrypoint's background health-check at the frontend
+            # Service (not this pod's own IP) so it resolves and exits cleanly.
+            - name: TEMPORAL_ADDRESS
+              value: "{{ include "temporal-stack.frontendService" $root }}:{{ $root.Values.temporal.frontendPort }}"
+            # Namespace + search-attribute provisioning is done once by the
+            # setup hook Job, not per-pod.
+            - name: SKIP_DEFAULT_NAMESPACE_CREATION
+              value: "true"
+            - name: SKIP_ADD_CUSTOM_SEARCH_ATTRIBUTES
+              value: "true"
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: /etc/temporal/dynamicconfig/dynamic_config.yaml
+            {{- include "temporal-stack.dbEnv" $root | nindent 12 }}
+          ports:
+            - name: grpc
+              containerPort: {{ $svc.grpcPort }}
+            - name: membership
+              containerPort: {{ $svc.membershipPort }}
+          # The membership (ringpop) port is the one port every role opens once
+          # initialised — the worker service has no client gRPC listener.
+          readinessProbe:
+            tcpSocket:
+              port: {{ $svc.membershipPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: {{ $svc.membershipPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+          volumeMounts:
+            - name: config
+              mountPath: /etc/temporal/config
+            - name: dynamicconfig
+              mountPath: /etc/temporal/dynamicconfig
+          resources:
+            {{- toYaml $svc.resources | nindent 12 }}
+      volumes:
+        - name: config
+          emptyDir: {}
+        - name: dynamicconfig
+          configMap:
+            name: {{ $full }}-dynamicconfig
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $full }}-{{ $role }}
+  labels:
+    {{- include "temporal-stack.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "temporal-stack.selectorLabels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+  ports:
+    - name: grpc
+      port: {{ $svc.grpcPort }}
+      targetPort: grpc
+    - name: membership
+      port: {{ $svc.membershipPort }}
+      targetPort: membership
+{{- end }}

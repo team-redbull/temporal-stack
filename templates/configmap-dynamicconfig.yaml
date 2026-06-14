@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "temporal-stack.fullname" . }}-dynamicconfig
+  labels:
+    {{- include "temporal-stack.labels" . | nindent 4 }}
+data:
+  dynamic_config.yaml: |
+    {{- if .Values.temporal.dynamicConfig }}
+    {{- toYaml .Values.temporal.dynamicConfig | nindent 4 }}
+    {{- else }}
+    {}
+    {{- end }}
