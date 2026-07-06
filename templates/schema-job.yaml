@@ -6,8 +6,10 @@ metadata:
     {{- include "temporal-stack.labels" . | nindent 4 }}
     app.kubernetes.io/component: schema
   annotations:
-    # Run after the DB is up, on every install/upgrade. Idempotent.
-    "helm.sh/hook": post-install,post-upgrade
+    # Runs before the server Deployments so schema exists when they boot.
+    # Requires the DB to already exist outside this release (see database.host) —
+    # a bundled postgres subchart wouldn't exist yet at pre-install time.
+    "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
