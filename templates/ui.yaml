@@ -1,5 +1,6 @@
 {{- if .Values.ui.enabled }}
 {{- $full := include "temporal-stack.fullname" . -}}
+{{- $gateEnabled := eq (include "temporal-stack.uiGateEnabled" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -80,7 +81,13 @@ spec:
             - --openshift-service-account={{ $full }}-ui
             - --https-address=:{{ .Values.ui.auth.port }}
             - --http-address=
+            {{- if $gateEnabled }}
+            # Route through the username-allowlist gate instead of the UI
+            # directly — see the gate container below.
+            - --upstream=http://localhost:{{ .Values.ui.auth.gate.port }}
+            {{- else }}
             - --upstream=http://localhost:{{ .Values.ui.port }}
+            {{- end }}
             - --tls-cert=/etc/tls/private/tls.crt
             - --tls-key=/etc/tls/private/tls.key
             - --cookie-secret-file=/etc/proxy/secrets/session_secret
@@ -88,6 +95,11 @@ spec:
             - --skip-provider-button
             {{- with .Values.ui.auth.sar }}
             - --openshift-sar={{ toJson . }}
+            {{- end }}
+            {{- if $gateEnabled }}
+            # Required so the gate sidecar can read the authenticated
+            # username off X-Forwarded-User.
+            - --pass-user-headers=true
             {{- end }}
           ports:
             - name: proxy
@@ -114,6 +126,31 @@ spec:
             - name: proxy-cookie
               mountPath: /etc/proxy/secrets
         {{- end }}
+        {{- if $gateEnabled }}
+        # Identity allowlist: 403s any authenticated user not explicitly
+        # listed in ui.auth.allowedUsers, then proxies the rest to the UI.
+        # Sits behind oauth-proxy — nothing outside the pod can reach it or
+        # forge the X-Forwarded-User header it trusts.
+        - name: username-gate
+          image: "{{ .Values.ui.auth.gate.image.repository }}:{{ .Values.ui.auth.gate.image.tag }}"
+          imagePullPolicy: {{ .Values.ui.auth.gate.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - name: gate
+              containerPort: {{ .Values.ui.auth.gate.port }}
+          readinessProbe:
+            tcpSocket:
+              port: gate
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.ui.auth.gate.resources | nindent 12 }}
+          volumeMounts:
+            - name: gate-conf
+              mountPath: /etc/nginx/conf.d
+        {{- end }}
       {{- if .Values.ui.auth.enabled }}
       volumes:
         - name: proxy-tls
@@ -122,6 +159,11 @@ spec:
         - name: proxy-cookie
           secret:
             secretName: {{ .Values.ui.auth.existingCookieSecret | default (printf "%s-ui-proxy-cookie" $full) }}
+        {{- if $gateEnabled }}
+        - name: gate-conf
+          configMap:
+            name: {{ $full }}-ui-gate-conf
+        {{- end }}
       {{- end }}
 ---
 apiVersion: v1

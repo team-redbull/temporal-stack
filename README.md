@@ -78,6 +78,29 @@ upgrades (`lookup`); bring your own with `ui.auth.existingCookieSecret`
 (key `session_secret`). Requires `ui.route.enabled=true` (enforced at render
 time) — this is OpenShift-only, leave it disabled on plain Kubernetes.
 
+**Restricting who may log in** has two independent gates, because they answer
+different questions:
+
+- `ui.auth.sar` — a *permission* gate (SubjectAccessReview): "can this user do
+  X". Good for "anyone who can administer this namespace", bad for singling
+  out one person: `cluster-admin` is unconditional `verb=*`/`resource=*`, so
+  it satisfies **every** possible SAR — there is no SAR that admits one
+  cluster-admin while excluding another.
+- `ui.auth.allowedUsers` — an *identity* allowlist of exact OpenShift
+  usernames (e.g. one htpasswd account), enforced by an extra nginx sidecar
+  that checks oauth-proxy's `X-Forwarded-User` header. This excludes everyone
+  not named, cluster-admins included. Use this when the requirement is "this
+  specific account", not "anyone with some permission level".
+
+```yaml
+ui:
+  auth:
+    enabled: true
+    allowedUsers: ["admin-master"]   # exact htpasswd/OpenShift username(s)
+```
+
+Both can be set together (a request must pass both).
+
 Scope: this authenticates the **web UI Route only**. All users who pass see
 the full UI (no per-user roles), and the gRPC frontend (`:7233`) remains
 unauthenticated for in-cluster clients. Per-user authorization would need
@@ -117,6 +140,7 @@ pull each one, retag it under your Artifactory Docker registry, and push:
 | `docker.io/busybox:1.36` | wait-for init containers in the hook Jobs |
 | `docker.io/bitnamilegacy/postgresql:17.6.0-debian-12-r4` | bundled PostgreSQL **(skip if using external DB)** |
 | `quay.io/openshift/origin-oauth-proxy:4.18` | UI login sidecar **(skip unless `ui.auth.enabled`)** — note the `quay.io` source; override `ui.auth.image.repository`/`tag` to your mirror |
+| `docker.io/nginxinc/nginx-unprivileged:1.27-alpine` | UI login username-allowlist gate **(skip unless `ui.auth.allowedUsers` is set)** — override `ui.auth.gate.image.repository`/`tag` to your mirror |
 
 ```sh
 # Your Artifactory Docker registry (virtual/local repo), e.g.:

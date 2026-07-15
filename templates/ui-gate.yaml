@@ -1,0 +1,36 @@
+{{- if eq (include "temporal-stack.uiGateEnabled" .) "true" }}
+{{- $full := include "temporal-stack.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $full }}-ui-gate-conf
+  labels:
+    {{- include "temporal-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+data:
+  gate.conf: |
+    # Identity allowlist for the Temporal UI. oauth-proxy (the only thing
+    # that can reach this container) sets X-Forwarded-User to the
+    # authenticated OpenShift username; anyone not in the map below is
+    # rejected regardless of what RBAC permissions they hold.
+    map $http_x_forwarded_user $temporal_ui_gate_allowed {
+        default 0;
+        {{- range .Values.ui.auth.allowedUsers }}
+        {{ . | quote }} 1;
+        {{- end }}
+    }
+
+    server {
+        listen {{ .Values.ui.auth.gate.port }};
+
+        location / {
+            if ($temporal_ui_gate_allowed = 0) {
+                return 403;
+            }
+            proxy_pass http://127.0.0.1:{{ .Values.ui.port }};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-User $http_x_forwarded_user;
+        }
+    }
+{{- end }}

@@ -36,6 +36,11 @@ app.kubernetes.io/name: {{ include "temporal-stack.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* True when the username-allowlist gate sidecar should be deployed */}}
+{{- define "temporal-stack.uiGateEnabled" -}}
+{{- and .Values.ui.auth.enabled (gt (len .Values.ui.auth.allowedUsers) 0) -}}
+{{- end -}}
+
 {{/* Frontend service name that clients/UI connect to */}}
 {{- define "temporal-stack.frontendService" -}}
 {{- printf "%s-frontend" (include "temporal-stack.fullname" .) -}}
