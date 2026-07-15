@@ -326,6 +326,32 @@ reinstall on a fresh cluster reproduces the same retention.
 > window, raise the cap first via `temporal.dynamicConfig` (see Temporal's
 > dynamic-config reference for the current max-retention key).
 
+## Deleting workflows
+
+The bundled `temporalio/ui:2.51.0` does not reliably expose a per-workflow
+Delete action in the workflow detail page's menu (only Reset/Terminate/etc.,
+version-dependent) — **Reset is not a delete**, it starts a new run from an
+earlier point in history and leaves the original in place. Deletion is done
+via the `temporal` CLI, from any pod that can reach the frontend (the
+`temporal-frontend` Deployment's own container has the CLI built in):
+
+```sh
+# Single workflow, by ID
+oc exec -n temporal deploy/temporal-frontend -- \
+  temporal workflow delete --address temporal-frontend:7233 --namespace default \
+  --workflow-id <workflow-id>
+
+# Bulk, by visibility query — e.g. every Completed workflow in the namespace
+oc exec -n temporal deploy/temporal-frontend -- \
+  temporal workflow delete --address temporal-frontend:7233 --namespace default \
+  --query "ExecutionStatus='Completed'"
+```
+
+Deletion is asynchronous and removes the workflow's Event History; if the
+workflow is still Running, the server terminates it first. This is immediate
+and manual — independent of (and faster than) waiting for retention to expire
+it automatically (see "Workflow retention" above).
+
 ## Common overrides
 
 ```yaml
