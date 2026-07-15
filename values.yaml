@@ -111,10 +111,51 @@ ui:
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 256Mi }
+
+  # OpenShift OAuth login in front of the UI ("log in with OpenShift", like
+  # the ArgoCD experience). Adds an oauth-proxy sidecar that authenticates
+  # browsers against the cluster's OAuth server before proxying to the UI.
+  # Requires ui.route.enabled (the OAuth redirect URI is derived from the
+  # Route via a ServiceAccount annotation — no OAuthClient object needed) and
+  # forces the Route to reencrypt termination (TLS to the sidecar is minted by
+  # the service-ca operator). OpenShift-only; leave disabled elsewhere.
+  #
+  # NOTE: this guards the Route only. In-cluster clients can still reach the
+  # UI pod's HTTP port directly (the Service stops exposing it, but the pod
+  # listens on all interfaces), and the Temporal gRPC frontend (7233) remains
+  # unauthenticated either way.
+  auth:
+    enabled: false
+    image:
+      repository: quay.io/openshift/origin-oauth-proxy
+      tag: "4.18"
+      pullPolicy: IfNotPresent
+    # HTTPS port the sidecar listens on; the Service/Route target this
+    # instead of the UI's plain HTTP port when auth is enabled.
+    port: 8443
+    # Optional login gate: a SubjectAccessReview (JSON object) every user must
+    # pass (checked with the user's own token — no extra RBAC needed). Empty
+    # => ANY authenticated OpenShift user may log in. Examples:
+    #   only users who can read services in this namespace:
+    #     sar: { namespace: temporal, resource: services, verb: get }
+    #   only cluster-admins (wildcard verb/resource only matches RBAC rules
+    #   that themselves grant *, i.e. cluster-admin-equivalent roles):
+    #     sar: { resource: "*", verb: "*" }
+    sar: {}
+    # Bring-your-own session-cookie Secret (key `session_secret`, 32 random
+    # bytes). Empty => the chart generates one and preserves it across
+    # upgrades via `lookup` (client-side renders like `helm template` /
+    # `helm diff` show a fresh random value instead — cosmetic only).
+    existingCookieSecret: ""
+    resources:
+      requests: { cpu: 25m, memory: 64Mi }
+      limits:   { cpu: 200m, memory: 128Mi }
+
   route:
     enabled: true
     # Leave host empty to let OpenShift assign <name>-<namespace>.apps.<cluster>.
     host: ""
+    # Ignored when ui.auth.enabled — the Route is forced to reencrypt then.
     tls:
       termination: edge
       insecureEdgeTerminationPolicy: Redirect

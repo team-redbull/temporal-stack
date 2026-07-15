@@ -12,7 +12,7 @@ single namespace — no cluster-scoped resources.
 | Temporal    | Split services — `frontend`, `history`, `matching`, `worker` (2 replicas each) |
 | Schema      | Post-install/upgrade hook Job: creates `temporal` + `temporal_visibility` DBs & schemas |
 | Setup       | Post-install/upgrade hook Job: registers the `default` namespace + search attributes |
-| Web UI      | `temporalio/ui` Deployment + Service + OpenShift **Route** (edge TLS) |
+| Web UI      | `temporalio/ui` Deployment + Service + OpenShift **Route** (edge TLS; optional OpenShift OAuth login — see below) |
 
 Service topology and the `cluster_membership`-table based ringpop discovery mean the
 server pods find each other by pod IP — no headless service required.
@@ -49,6 +49,41 @@ Connect a Temporal client (in-cluster, gRPC):
 temporal-frontend.temporal.svc.cluster.local:7233
 ```
 
+## OpenShift login for the Web UI (`ui.auth`)
+
+By default the UI Route is wide open. Setting `ui.auth.enabled=true` puts an
+[`oauth-proxy`](https://github.com/openshift/oauth-proxy) sidecar in front of
+it: browsers are sent to the cluster's OAuth login page and come back as their
+existing OpenShift user — the same experience as ArgoCD's "log in with
+OpenShift". No identity provider to deploy, no `OAuthClient` object: the UI's
+ServiceAccount is annotated as an OAuth client whose redirect URI is derived
+from the Route, and the sidecar's TLS cert is minted/rotated by the service-ca
+operator. The Route switches to `reencrypt` termination automatically.
+
+```yaml
+ui:
+  auth:
+    enabled: true
+    # Optional: restrict WHO may log in (default: any authenticated user).
+    # A SubjectAccessReview every user must pass, e.g. only people who can
+    # read services in the temporal namespace:
+    sar: { namespace: temporal, resource: services, verb: get }
+    # ...or only cluster-admins — the wildcard only matches RBAC rules that
+    # themselves grant verb=* on resource=*:
+    # sar: { resource: "*", verb: "*" }
+```
+
+The session-cookie secret is generated on first install and preserved across
+upgrades (`lookup`); bring your own with `ui.auth.existingCookieSecret`
+(key `session_secret`). Requires `ui.route.enabled=true` (enforced at render
+time) — this is OpenShift-only, leave it disabled on plain Kubernetes.
+
+Scope: this authenticates the **web UI Route only**. All users who pass see
+the full UI (no per-user roles), and the gRPC frontend (`:7233`) remains
+unauthenticated for in-cluster clients. Per-user authorization would need
+Temporal's own JWT/claim-mapper auth with a real OIDC provider (Dex/Keycloak)
+— out of scope for this chart today.
+
 ## OpenShift specifics (why this chart "just works")
 
 - **Arbitrary UID (restricted-v2 SCC):** no container pins `runAsUser`/`fsGroup`.
@@ -81,6 +116,7 @@ pull each one, retag it under your Artifactory Docker registry, and push:
 | `docker.io/temporalio/ui:2.51.0` | Web UI |
 | `docker.io/busybox:1.36` | wait-for init containers in the hook Jobs |
 | `docker.io/bitnamilegacy/postgresql:17.6.0-debian-12-r4` | bundled PostgreSQL **(skip if using external DB)** |
+| `quay.io/openshift/origin-oauth-proxy:4.18` | UI login sidecar **(skip unless `ui.auth.enabled`)** — note the `quay.io` source; override `ui.auth.image.repository`/`tag` to your mirror |
 
 ```sh
 # Your Artifactory Docker registry (virtual/local repo), e.g.:

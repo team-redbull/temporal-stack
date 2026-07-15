@@ -1,0 +1,39 @@
+{{- if and .Values.ui.enabled .Values.ui.auth.enabled }}
+{{- if not .Values.ui.route.enabled }}
+{{- fail "ui.auth.enabled requires ui.route.enabled — the OAuth redirect URI is derived from the Route" }}
+{{- end }}
+{{- $full := include "temporal-stack.fullname" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $full }}-ui
+  labels:
+    {{- include "temporal-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+  annotations:
+    # Turns this SA into an OAuth client whose redirect URI is resolved from
+    # the UI Route at login time — no cluster-scoped OAuthClient needed.
+    serviceaccounts.openshift.io/oauth-redirectreference.primary: >-
+      {"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"{{ $full }}-ui"}}
+{{- if not .Values.ui.auth.existingCookieSecret }}
+---
+{{- $secretName := printf "%s-ui-proxy-cookie" $full }}
+{{- $cookie := randAlphaNum 32 }}
+{{- with (lookup "v1" "Secret" .Release.Namespace $secretName) }}
+{{- $cookie = index .data "session_secret" | b64dec }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "temporal-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ui
+type: Opaque
+stringData:
+  # Signs/encrypts the oauth-proxy session cookie. The lookup above keeps the
+  # in-cluster value stable across upgrades; regenerating it would only force
+  # users to log in again.
+  session_secret: {{ $cookie | quote }}
+{{- end }}
+{{- end }}

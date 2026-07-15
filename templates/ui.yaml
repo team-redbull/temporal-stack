@@ -23,6 +23,11 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.ui.auth.enabled }}
+      # SA carries the OAuth redirect annotation (see ui-auth.yaml) and is the
+      # identity oauth-proxy authenticates as against the OAuth server.
+      serviceAccountName: {{ $full }}-ui
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -59,6 +64,65 @@ spec:
             periodSeconds: 15
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
+        {{- if .Values.ui.auth.enabled }}
+        # Authenticating reverse proxy: browsers hit this over the Route, log
+        # in via the cluster OAuth server, then get proxied to the UI on
+        # localhost. TLS cert/key are minted by the service-ca operator (see
+        # the Service annotation below).
+        - name: oauth-proxy
+          image: "{{ .Values.ui.auth.image.repository }}:{{ .Values.ui.auth.image.tag }}"
+          imagePullPolicy: {{ .Values.ui.auth.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          args:
+            - --provider=openshift
+            - --openshift-service-account={{ $full }}-ui
+            - --https-address=:{{ .Values.ui.auth.port }}
+            - --http-address=
+            - --upstream=http://localhost:{{ .Values.ui.port }}
+            - --tls-cert=/etc/tls/private/tls.crt
+            - --tls-key=/etc/tls/private/tls.key
+            - --cookie-secret-file=/etc/proxy/secrets/session_secret
+            - --cookie-secure=true
+            - --skip-provider-button
+            {{- with .Values.ui.auth.sar }}
+            - --openshift-sar={{ toJson . }}
+            {{- end }}
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.ui.auth.port }}
+          readinessProbe:
+            httpGet:
+              path: /oauth/healthz
+              port: proxy
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /oauth/healthz
+              port: proxy
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.ui.auth.resources | nindent 12 }}
+          volumeMounts:
+            - name: proxy-tls
+              mountPath: /etc/tls/private
+            - name: proxy-cookie
+              mountPath: /etc/proxy/secrets
+        {{- end }}
+      {{- if .Values.ui.auth.enabled }}
+      volumes:
+        - name: proxy-tls
+          secret:
+            secretName: {{ $full }}-ui-proxy-tls
+        - name: proxy-cookie
+          secret:
+            secretName: {{ .Values.ui.auth.existingCookieSecret | default (printf "%s-ui-proxy-cookie" $full) }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -67,15 +131,29 @@ metadata:
   labels:
     {{- include "temporal-stack.labels" . | nindent 4 }}
     app.kubernetes.io/component: ui
+  {{- if .Values.ui.auth.enabled }}
+  annotations:
+    # service-ca operator mints a TLS cert for the oauth-proxy sidecar and
+    # keeps it rotated in this Secret.
+    service.beta.openshift.io/serving-cert-secret-name: {{ $full }}-ui-proxy-tls
+  {{- end }}
 spec:
   type: ClusterIP
   selector:
     {{- include "temporal-stack.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: ui
   ports:
+    {{- if .Values.ui.auth.enabled }}
+    # Only the authenticated proxy port is exposed — the UI's plain HTTP port
+    # must not be reachable through the Service, or auth could be bypassed.
+    - name: proxy
+      port: {{ .Values.ui.auth.port }}
+      targetPort: proxy
+    {{- else }}
     - name: http
       port: {{ .Values.ui.port }}
       targetPort: http
+    {{- end }}
 {{- if .Values.ui.route.enabled }}
 ---
 apiVersion: route.openshift.io/v1
@@ -93,11 +171,22 @@ spec:
     kind: Service
     name: {{ $full }}-ui
     weight: 100
+  {{- if .Values.ui.auth.enabled }}
+  port:
+    targetPort: proxy
+  # Reencrypt is forced with auth: the router must terminate edge TLS AND
+  # re-encrypt to the oauth-proxy sidecar's service-ca cert (which the router
+  # trusts implicitly — no destinationCACertificate needed).
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+  {{- else }}
   port:
     targetPort: http
   {{- with .Values.ui.route.tls }}
   tls:
     {{- toYaml . | nindent 4 }}
+  {{- end }}
   {{- end }}
   wildcardPolicy: None
 {{- end }}
