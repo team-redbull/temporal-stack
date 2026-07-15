@@ -79,7 +79,14 @@ temporal:
   setup:
     enabled: true
     defaultNamespace: default
-    retention: 72h
+    # How long CLOSED workflows (any final state) are kept before Temporal
+    # purges them from history/visibility. Applied by the setup Job ONLY when
+    # it first CREATES the namespace — on a cluster where the namespace
+    # already exists, changing this and re-syncing does nothing (the Job takes
+    # its "already exists" branch). To change retention on an existing
+    # namespace, run `temporal operator namespace update --retention <dur>`
+    # against the live cluster — see README ("Workflow retention").
+    retention: 168h   # 1 week
     searchAttributes: true
 
   # Extra Temporal dynamic config (rendered into a ConfigMap).

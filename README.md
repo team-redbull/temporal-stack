@@ -284,6 +284,48 @@ placeholder** for the bundled-DB test path. For production:
   in values.
 - Bundled DB → set `postgresql.auth.existingSecret` and remove the inline password.
 
+## Workflow retention
+
+Temporal keeps a **closed** workflow (Completed, Failed, Terminated — any final
+state) in history/visibility only for a retention period, then purges it
+automatically. Open (Running) workflows are never purged. The chart default is
+**`temporal.setup.retention: 168h` (1 week)**; the minimum Temporal allows is
+`24h`.
+
+**Important — this value only applies when the namespace is first created.**
+The setup Job (`templates/namespace-setup-job.yaml`) runs
+`temporal operator namespace create --retention <value>` **only if the
+namespace doesn't already exist**; on a cluster where it does, changing
+`retention` and re-running `helm upgrade`/`helmfile sync` has **no effect** (the
+Job takes its "already exists" branch). So there are two cases:
+
+- **New cluster / new namespace** — set `temporal.setup.retention` in values
+  (or your Helmfile override) before the first install and you're done.
+- **Namespace already exists** — update it live; the chart won't do it for you:
+
+  ```sh
+  oc exec -n temporal deploy/temporal-frontend -- \
+    temporal operator namespace update --address temporal-frontend:7233 \
+    --namespace default --retention 168h
+  ```
+
+  This takes effect immediately for workflows that close afterward. It does
+  **not** resurrect already-purged workflows. Confirm with:
+
+  ```sh
+  oc exec -n temporal deploy/temporal-frontend -- \
+    temporal operator namespace describe --address temporal-frontend:7233 \
+    --namespace default | grep -i retention
+  ```
+
+Keep the values file and the live namespace in agreement, so a future
+reinstall on a fresh cluster reproduces the same retention.
+
+> Retention above the cluster's max (Temporal's default cap is 30 days) is
+> rejected with an `invalid retention period` error — if you need a longer
+> window, raise the cap first via `temporal.dynamicConfig` (see Temporal's
+> dynamic-config reference for the current max-retention key).
+
 ## Common overrides
 
 ```yaml
@@ -293,6 +335,11 @@ postgresql:
     persistence:
       size: 50Gi
       storageClass: my-fast-rwo
+
+# Closed-workflow retention (NEW namespaces only — see "Workflow retention")
+temporal:
+  setup:
+    retention: 720h   # 30 days
 
 # Scale a role
 temporal:
